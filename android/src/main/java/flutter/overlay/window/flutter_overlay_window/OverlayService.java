@@ -10,6 +10,7 @@ import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.PixelFormat;
 import android.app.PendingIntent;
 import android.graphics.Point;
@@ -22,7 +23,9 @@ import android.util.TypedValue;
 import android.view.Display;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.view.WindowMetrics;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
@@ -135,24 +138,34 @@ public class OverlayService extends Service implements View.OnTouchListener {
             szWindow.set(w, h);
         }
         int orientation = this.getResources().getConfiguration().orientation;
+        int desiredHeight =
+                (orientation == Configuration.ORIENTATION_LANDSCAPE)
+                        ? WindowSetup.width
+                        : WindowSetup.height != -1999
+                        ? WindowSetup.height
+                        : screenHeight();
+
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowSetup.width == -1999 ? -1 : WindowSetup.width,
-                (orientation == Configuration.ORIENTATION_LANDSCAPE) ? WindowSetup.width
-                        : WindowSetup.height != -1999 ? WindowSetup.height : screenHeight(),
-                0,
-                -(statusBarHeightPx() + navigationBarHeight()),
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE,
-                WindowSetup.flag | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                WindowSetup.width == -1999 ? WindowManager.LayoutParams.MATCH_PARENT : WindowSetup.width,
+                desiredHeight,
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                        : WindowManager.LayoutParams.TYPE_PHONE,
+                WindowSetup.flag
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                         | WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR
                         | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                 PixelFormat.TRANSLUCENT
         );
+        params.x = 0;
+        params.y = 0;
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && WindowSetup.flag == clickableFlag) {
             params.alpha = MAXIMUM_OPACITY_ALLOWED_FOR_S_AND_HIGHER;
         }
         params.gravity = WindowSetup.gravity;
         params.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+
         flutterView.setOnTouchListener(this);
         windowManager.addView(flutterView, params);
         return START_STICKY;
@@ -161,13 +174,32 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
     @RequiresApi(api = Build.VERSION_CODES.JELLY_BEAN_MR1)
     private int screenHeight() {
-        Display display = windowManager.getDefaultDisplay();
-        DisplayMetrics dm = new DisplayMetrics();
-        display.getRealMetrics(dm);
-        return inPortrait() ?
-                dm.heightPixels + statusBarHeightPx() + navigationBarHeightPx() + navigationBarHeight()
-                :
-                dm.heightPixels + statusBarHeightPx();
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowMetrics metrics = windowManager.getCurrentWindowMetrics();
+                Insets insets = metrics.getWindowInsets().getInsets(WindowInsets.Type.systemBars());
+                int total = metrics.getBounds().height();
+                int topInset = insets.top;
+                int bottomInset = insets.bottom;
+                
+                return inPortrait()
+                        ? total - topInset - bottomInset
+                        : total - topInset;
+            } else {
+                Display display = windowManager.getDefaultDisplay();
+                DisplayMetrics dm = new DisplayMetrics();
+                display.getRealMetrics(dm);
+                int total = dm.heightPixels;
+                int status = statusBarHeightPx();
+                int nav = navigationBarHeightPx();
+                
+                return inPortrait()
+                        ? total - status - nav
+                        : total - status;
+            }
+        } catch (Exception e) {
+            return mResources.getDisplayMetrics().heightPixels;
+        }
     }
 
     private int navigationBarHeight() {
