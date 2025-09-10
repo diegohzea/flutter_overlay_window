@@ -130,25 +130,25 @@ public class OverlayService extends Service implements View.OnTouchListener {
         });
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
-            windowManager.getDefaultDisplay().getSize(szWindow);
+        int realWidth;
+        int realHeight;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowMetrics wm = windowManager.getCurrentWindowMetrics();
+            realWidth = wm.getBounds().width();
+            realHeight = wm.getBounds().height();
         } else {
-            DisplayMetrics displaymetrics = new DisplayMetrics();
-            windowManager.getDefaultDisplay().getMetrics(displaymetrics);
-            int w = displaymetrics.widthPixels;
-            int h = displaymetrics.heightPixels;
-            szWindow.set(w, h);
+            DisplayMetrics m = new DisplayMetrics();
+            windowManager.getDefaultDisplay().getRealMetrics(m);
+            realWidth = m.widthPixels;
+            realHeight = m.heightPixels;
         }
         int orientation = this.getResources().getConfiguration().orientation;
-        int desiredHeight = (orientation == Configuration.ORIENTATION_LANDSCAPE)
-                ? WindowSetup.width
-                : WindowSetup.height != -1999
-                        ? WindowSetup.height
-                        : screenHeight();
 
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowSetup.width == -1999 ? WindowManager.LayoutParams.MATCH_PARENT : WindowSetup.width,
-                desiredHeight,
+                (WindowSetup.width == -1999 || WindowSetup.width == -1) ? WindowManager.LayoutParams.MATCH_PARENT
+                        : WindowSetup.width,
+                (WindowSetup.height == -1999 || WindowSetup.height == -1) ? WindowManager.LayoutParams.MATCH_PARENT
+                        : WindowSetup.height,
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                         ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                         : WindowManager.LayoutParams.TYPE_PHONE,
@@ -158,6 +158,12 @@ public class OverlayService extends Service implements View.OnTouchListener {
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                         | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                 PixelFormat.TRANSLUCENT);
+
+        if (params.width == WindowManager.LayoutParams.MATCH_PARENT)
+            params.width = realWidth;
+        if (params.height == WindowManager.LayoutParams.MATCH_PARENT)
+            params.height = realHeight;
+
         params.x = 0;
         params.y = 0;
 
@@ -167,27 +173,11 @@ public class OverlayService extends Service implements View.OnTouchListener {
         params.gravity = WindowSetup.gravity;
         params.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
 
+        flutterView.setFitsSystemWindows(false);
+
         flutterView.setOnTouchListener(this);
         windowManager.addView(flutterView, params);
         return START_STICKY;
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.JELLY_BEAN_MR1)
-    private int screenHeight() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                WindowMetrics metrics = windowManager.getCurrentWindowMetrics();
-                // 👇 usar la altura completa del bound
-                return metrics.getBounds().height();
-            } else {
-                Display display = windowManager.getDefaultDisplay();
-                DisplayMetrics dm = new DisplayMetrics();
-                display.getRealMetrics(dm);
-                return dm.heightPixels;
-            }
-        } catch (Exception e) {
-            return mResources.getDisplayMetrics().heightPixels;
-        }
     }
 
     private int navigationBarHeight() {
@@ -230,14 +220,16 @@ public class OverlayService extends Service implements View.OnTouchListener {
         if (windowManager != null) {
             WindowSetup.setFlag(flag);
             WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
-            params.flags = WindowSetup.flag | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS |
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
-                    WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR
+            params.flags = WindowSetup.flag
+                    | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                     | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && WindowSetup.flag == clickableFlag) {
                 params.alpha = MAXIMUM_OPACITY_ALLOWED_FOR_S_AND_HIGHER;
             } else {
-                params.alpha = 1;
+                params.alpha = 1f;
             }
             windowManager.updateViewLayout(flutterView, params);
             result.success(true);
@@ -249,8 +241,27 @@ public class OverlayService extends Service implements View.OnTouchListener {
     private void resizeOverlay(int width, int height, MethodChannel.Result result) {
         if (windowManager != null) {
             WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
-            params.width = (width == -1999 || width == -1) ? -1 : dpToPx(width);
-            params.height = (height != 1999 || height != -1) ? dpToPx(height) : height;
+
+            params.width = (width == -1999 || width == -1) ? WindowManager.LayoutParams.MATCH_PARENT : dpToPx(width);
+            params.height = (height == -1999 || height == -1) ? WindowManager.LayoutParams.MATCH_PARENT
+                    : dpToPx(height);
+
+            int realW, realH;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowMetrics wm = windowManager.getCurrentWindowMetrics();
+                realW = wm.getBounds().width();
+                realH = wm.getBounds().height();
+            } else {
+                DisplayMetrics m = new DisplayMetrics();
+                windowManager.getDefaultDisplay().getRealMetrics(m);
+                realW = m.widthPixels;
+                realH = m.heightPixels;
+            }
+            if (params.width == WindowManager.LayoutParams.MATCH_PARENT)
+                params.width = realW;
+            if (params.height == WindowManager.LayoutParams.MATCH_PARENT)
+                params.height = realH;
+
             windowManager.updateViewLayout(flutterView, params);
             result.success(true);
         } else {
@@ -304,8 +315,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     }
 
     private int dpToPx(int dp) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
-                Float.parseFloat(dp + ""), mResources.getDisplayMetrics());
+        return Math.round(dp * mResources.getDisplayMetrics().density);
     }
 
     private boolean inPortrait() {
