@@ -176,7 +176,19 @@ public class OverlayService extends Service implements View.OnTouchListener {
         flutterView.setFitsSystemWindows(false);
 
         flutterView.setOnTouchListener(this);
-        windowManager.addView(flutterView, params);
+
+        // Post to handler to ensure FlutterView is fully initialized before adding to WindowManager
+        // This prevents "InputChannel is not initialized" crash
+        new Handler().post(() -> {
+            try {
+                if (windowManager != null && flutterView != null) {
+                    windowManager.addView(flutterView, params);
+                }
+            } catch (Exception e) {
+                Log.e("OverlayService", "Error adding view to WindowManager", e);
+            }
+        });
+
         return START_STICKY;
     }
 
