@@ -83,11 +83,21 @@ public class OverlayService extends Service implements View.OnTouchListener {
     @Override
     public void onDestroy() {
         Log.d("OverLay", "Destroying the overlay window service");
-        if (windowManager != null) {
-            windowManager.removeView(flutterView);
-            windowManager = null;
-            flutterView.detachFromFlutterEngine();
-            flutterView = null;
+        if (windowManager != null && flutterView != null) {
+            try {
+                if (flutterView.isAttachedToWindow()) {
+                    windowManager.removeView(flutterView);
+                    Log.d("OverLay", "FlutterView successfully removed from WindowManager");
+                } else {
+                    Log.w("OverLay", "FlutterView was not attached to window, skipping removeView");
+                }
+            } catch (IllegalArgumentException e) {
+                Log.e("OverLay", "Error removing view from WindowManager: " + e.getMessage());
+            } finally {
+                windowManager = null;
+                flutterView.detachFromFlutterEngine();
+                flutterView = null;
+            }
         }
         NotificationManager notificationManager = (NotificationManager) getApplicationContext()
                 .getSystemService(Context.NOTIFICATION_SERVICE);
