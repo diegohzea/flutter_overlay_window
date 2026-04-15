@@ -125,6 +125,12 @@ public class OverlayService extends Service implements View.OnTouchListener {
         flutterView.setFocusable(true);
         flutterView.setFocusableInTouchMode(true);
         flutterView.setBackgroundColor(Color.TRANSPARENT);
+        // Disable accessibility to prevent AccessibilityBridge crash.
+        // The overlay's FlutterView can be detached from its ViewParent by
+        // the WindowManager at any time, causing a NullPointerException in
+        // AccessibilityBridge.sendAccessibilityEvent() which results in a
+        // FATAL abort that kills the entire process.
+        flutterView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         flutterChannel.setMethodCallHandler((call, result) -> {
             if (call.method.equals("updateFlag")) {
                 String flag = call.argument("flag").toString();
