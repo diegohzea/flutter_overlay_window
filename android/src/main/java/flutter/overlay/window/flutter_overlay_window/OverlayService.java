@@ -58,7 +58,6 @@ public class OverlayService extends Service implements View.OnTouchListener {
     public static boolean isRunning = false;
     private WindowManager windowManager = null;
     private FlutterView flutterView;
-    private android.widget.FrameLayout flutterContainer;
     private MethodChannel flutterChannel = null;
     private BasicMessageChannel<Object> overlayMessageChannel = null;
     private int clickableFlag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -86,9 +85,8 @@ public class OverlayService extends Service implements View.OnTouchListener {
         Log.d("OverLay", "Destroying the overlay window service");
         if (windowManager != null) {
             try {
-                View viewToRemove = flutterContainer != null ? flutterContainer : flutterView;
-                if (viewToRemove != null && viewToRemove.isAttachedToWindow()) {
-                    windowManager.removeView(viewToRemove);
+                if (flutterView != null && flutterView.isAttachedToWindow()) {
+                    windowManager.removeView(flutterView);
                     Log.d("OverLay", "Overlay view successfully removed from WindowManager");
                 } else {
                     Log.w("OverLay", "Overlay view was not attached to window, skipping removeView");
@@ -101,7 +99,6 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     flutterView.detachFromFlutterEngine();
                     flutterView = null;
                 }
-                flutterContainer = null;
             }
         }
         // Destroy the Flutter engine to prevent AccessibilityBridge crash.
@@ -205,25 +202,21 @@ public class OverlayService extends Service implements View.OnTouchListener {
         params.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
 
         flutterView.setFitsSystemWindows(false);
+        flutterView.setOnTouchListener(this);
 
-        flutterContainer.setOnTouchListener(this);
-
-        // Wrap FlutterView in a FrameLayout container.
-        // This prevents the AccessibilityBridge crash: when the WindowManager
-        // detaches the overlay, the FlutterView's getParent() returns the
-        // FrameLayout (not null), so AccessibilityBridge.sendAccessibilityEvent()
-        // won't throw a NullPointerException.
-        flutterContainer = new android.widget.FrameLayout(getApplicationContext());
-        flutterContainer.addView(flutterView, new android.widget.FrameLayout.LayoutParams(
-                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
-                android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        // Add SafeOverlayFlutterView directly to WindowManager (no FrameLayout wrapper).
+        // SafeOverlayFlutterView.getParent() returns a safe no-op ViewParent when the real
+        // parent is null, preventing the AccessibilityBridge NPE → FATAL crash.
+        // A FrameLayout wrapper would bypass this protection because FlutterView.getParent()
+        // would return the FrameLayout (not null), but FrameLayout.getParent() would be null
+        // before/after WindowManager attachment, causing the same crash.
 
         // Post to handler to ensure FlutterView is fully initialized before adding to WindowManager
         // This prevents "InputChannel is not initialized" crash
         new Handler().post(() -> {
             try {
-                if (windowManager != null && flutterContainer != null) {
-                    windowManager.addView(flutterContainer, params);
+                if (windowManager != null && flutterView != null) {
+                    windowManager.addView(flutterView, params);
                 }
             } catch (Exception e) {
                 Log.e("OverlayService", "Error adding view to WindowManager", e);
@@ -270,7 +263,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     }
 
     private View getOverlayView() {
-        return flutterContainer != null ? flutterContainer : flutterView;
+        return flutterView;
     }
 
     private void updateOverlayFlag(MethodChannel.Result result, String flag) {
