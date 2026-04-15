@@ -104,6 +104,21 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 flutterContainer = null;
             }
         }
+        // Destroy the Flutter engine to prevent AccessibilityBridge crash.
+        // After the overlay view is removed, the engine may still attempt to
+        // call updateSemantics → sendAccessibilityEvent → getParent() which
+        // returns null and causes a FATAL abort. Destroying the engine stops
+        // all semantics updates immediately.
+        try {
+            FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
+            if (engine != null) {
+                engine.destroy();
+                FlutterEngineCache.getInstance().remove(OverlayConstants.CACHED_TAG);
+                Log.d("OverLay", "Flutter engine destroyed successfully");
+            }
+        } catch (Exception e) {
+            Log.e("OverLay", "Error destroying Flutter engine: " + e.getMessage());
+        }
         NotificationManager notificationManager = (NotificationManager) getApplicationContext()
                 .getSystemService(Context.NOTIFICATION_SERVICE);
         notificationManager.cancel(OverlayConstants.NOTIFICATION_ID);
