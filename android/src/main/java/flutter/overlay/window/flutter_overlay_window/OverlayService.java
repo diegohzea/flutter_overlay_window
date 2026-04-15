@@ -58,6 +58,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     public static boolean isRunning = false;
     private WindowManager windowManager = null;
     private FlutterView flutterView;
+    private android.widget.FrameLayout flutterContainer;
     private MethodChannel flutterChannel = null;
     private BasicMessageChannel<Object> overlayMessageChannel = null;
     private int clickableFlag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -83,20 +84,24 @@ public class OverlayService extends Service implements View.OnTouchListener {
     @Override
     public void onDestroy() {
         Log.d("OverLay", "Destroying the overlay window service");
-        if (windowManager != null && flutterView != null) {
+        if (windowManager != null) {
             try {
-                if (flutterView.isAttachedToWindow()) {
-                    windowManager.removeView(flutterView);
-                    Log.d("OverLay", "FlutterView successfully removed from WindowManager");
+                View viewToRemove = flutterContainer != null ? flutterContainer : flutterView;
+                if (viewToRemove != null && viewToRemove.isAttachedToWindow()) {
+                    windowManager.removeView(viewToRemove);
+                    Log.d("OverLay", "Overlay view successfully removed from WindowManager");
                 } else {
-                    Log.w("OverLay", "FlutterView was not attached to window, skipping removeView");
+                    Log.w("OverLay", "Overlay view was not attached to window, skipping removeView");
                 }
             } catch (IllegalArgumentException e) {
                 Log.e("OverLay", "Error removing view from WindowManager: " + e.getMessage());
             } finally {
                 windowManager = null;
-                flutterView.detachFromFlutterEngine();
-                flutterView = null;
+                if (flutterView != null) {
+                    flutterView.detachFromFlutterEngine();
+                    flutterView = null;
+                }
+                flutterContainer = null;
             }
         }
         NotificationManager notificationManager = (NotificationManager) getApplicationContext()
@@ -125,11 +130,6 @@ public class OverlayService extends Service implements View.OnTouchListener {
         flutterView.setFocusable(true);
         flutterView.setFocusableInTouchMode(true);
         flutterView.setBackgroundColor(Color.TRANSPARENT);
-        // Disable accessibility to prevent AccessibilityBridge crash.
-        // The overlay's FlutterView can be detached from its ViewParent by
-        // the WindowManager at any time, causing a NullPointerException in
-        // AccessibilityBridge.sendAccessibilityEvent() which results in a
-        // FATAL abort that kills the entire process.
         flutterView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         flutterChannel.setMethodCallHandler((call, result) -> {
             if (call.method.equals("updateFlag")) {
@@ -191,14 +191,24 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
         flutterView.setFitsSystemWindows(false);
 
-        flutterView.setOnTouchListener(this);
+        flutterContainer.setOnTouchListener(this);
+
+        // Wrap FlutterView in a FrameLayout container.
+        // This prevents the AccessibilityBridge crash: when the WindowManager
+        // detaches the overlay, the FlutterView's getParent() returns the
+        // FrameLayout (not null), so AccessibilityBridge.sendAccessibilityEvent()
+        // won't throw a NullPointerException.
+        flutterContainer = new android.widget.FrameLayout(getApplicationContext());
+        flutterContainer.addView(flutterView, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
 
         // Post to handler to ensure FlutterView is fully initialized before adding to WindowManager
         // This prevents "InputChannel is not initialized" crash
         new Handler().post(() -> {
             try {
-                if (windowManager != null && flutterView != null) {
-                    windowManager.addView(flutterView, params);
+                if (windowManager != null && flutterContainer != null) {
+                    windowManager.addView(flutterContainer, params);
                 }
             } catch (Exception e) {
                 Log.e("OverlayService", "Error adding view to WindowManager", e);
@@ -244,10 +254,14 @@ public class OverlayService extends Service implements View.OnTouchListener {
         return mNavigationBarHeight;
     }
 
+    private View getOverlayView() {
+        return flutterContainer != null ? flutterContainer : flutterView;
+    }
+
     private void updateOverlayFlag(MethodChannel.Result result, String flag) {
         if (windowManager != null) {
             WindowSetup.setFlag(flag);
-            WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
+            WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
             params.flags = WindowSetup.flag
                     | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                     | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -259,7 +273,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
             } else {
                 params.alpha = 1f;
             }
-            windowManager.updateViewLayout(flutterView, params);
+            windowManager.updateViewLayout(getOverlayView(), params);
             result.success(true);
         } else {
             result.success(false);
@@ -268,7 +282,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
     private void resizeOverlay(int width, int height, MethodChannel.Result result) {
         if (windowManager != null) {
-            WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
+            WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
 
             params.width = (width == -1999 || width == -1) ? WindowManager.LayoutParams.MATCH_PARENT : dpToPx(width);
             params.height = (height == -1999 || height == -1) ? WindowManager.LayoutParams.MATCH_PARENT
@@ -290,7 +304,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
             if (params.height == WindowManager.LayoutParams.MATCH_PARENT)
                 params.height = realH;
 
-            windowManager.updateViewLayout(flutterView, params);
+            windowManager.updateViewLayout(getOverlayView(), params);
             result.success(true);
         } else {
             result.success(false);
@@ -353,7 +367,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     @Override
     public boolean onTouch(View view, MotionEvent event) {
         if (windowManager != null && WindowSetup.enableDrag) {
-            WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
+            WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
                     dragging = false;
@@ -373,7 +387,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     params.x = xx;
                     params.y = yy;
                     if (windowManager != null) {
-                        windowManager.updateViewLayout(flutterView, params);
+                        windowManager.updateViewLayout(getOverlayView(), params);
                     }
                     dragging = true;
                     break;
@@ -383,7 +397,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     if (WindowSetup.positionGravity != "none") {
                         if (windowManager == null)
                             return false;
-                        windowManager.updateViewLayout(flutterView, params);
+                        windowManager.updateViewLayout(getOverlayView(), params);
                         mTrayTimerTask = new TrayAnimationTimerTask();
                         mTrayAnimationTimer = new Timer();
                         mTrayAnimationTimer.schedule(mTrayTimerTask, 0, 25);
@@ -400,7 +414,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     private class TrayAnimationTimerTask extends TimerTask {
         int mDestX;
         int mDestY;
-        WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
+        WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
 
         public TrayAnimationTimerTask() {
             super();
@@ -429,7 +443,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 params.x = (2 * (params.x - mDestX)) / 3 + mDestX;
                 params.y = (2 * (params.y - mDestY)) / 3 + mDestY;
                 if (windowManager != null) {
-                    windowManager.updateViewLayout(flutterView, params);
+                    windowManager.updateViewLayout(getOverlayView(), params);
                 }
                 if (Math.abs(params.x - mDestX) < 2 && Math.abs(params.y - mDestY) < 2) {
                     TrayAnimationTimerTask.this.cancel();
