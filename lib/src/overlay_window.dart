@@ -123,6 +123,29 @@ class FlutterOverlayWindow {
     return _res ?? false;
   }
 
+  /// Check if the overlay engine is healthy (service running + engine alive + Dart executing).
+  /// Returns false if the overlay is in a corrupted state that would crash on use.
+  static Future<bool> isHealthy() async {
+    try {
+      final bool? res = await _channel.invokeMethod<bool?>('isOverlayHealthy');
+      return res ?? false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// Force-cleanup the overlay: stops service, destroys corrupted engine,
+  /// and recreates a fresh engine ready for the next [showOverlay] call.
+  /// Use this when [isHealthy] returns false to recover from a corrupted state.
+  static Future<bool> cleanup() async {
+    try {
+      final bool? res = await _channel.invokeMethod<bool?>('cleanupOverlay');
+      return res ?? false;
+    } catch (e) {
+      return false;
+    }
+  }
+
   /// Dispose overlay stream
   static void disposeOverlayListener() {
     _controller.close();

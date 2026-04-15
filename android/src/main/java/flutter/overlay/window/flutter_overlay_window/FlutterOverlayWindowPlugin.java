@@ -108,8 +108,13 @@ public class FlutterOverlayWindowPlugin implements
         } else if (call.method.equals("isOverlayActive")) {
             result.success(OverlayService.isRunning);
             return;
+        } else if (call.method.equals("isOverlayHealthy")) {
+            result.success(checkOverlayHealth());
+            return;
         } else if (call.method.equals("closeOverlay")) {
             stopService(result);
+        } else if (call.method.equals("cleanupOverlay")) {
+            cleanupOverlay(result);
         } else {
             result.notImplemented();
         }
@@ -165,6 +170,71 @@ public class FlutterOverlayWindowPlugin implements
                         .getDartExecutor(),
                 OverlayConstants.MESSENGER_TAG, JSONMessageCodec.INSTANCE);
         overlayMessageChannel.send(message, reply);
+    }
+
+    /**
+     * Checks if the overlay engine is in a healthy state.
+     * Returns true only if:
+     * - The service is running
+     * - The cached FlutterEngine exists
+     * - The DartExecutor is still executing
+     */
+    private boolean checkOverlayHealth() {
+        if (!OverlayService.isRunning) {
+            return false;
+        }
+        try {
+            FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
+            if (engine == null) {
+                Log.w("OverlayHealth", "Engine is null but service reports running");
+                return false;
+            }
+            if (engine.getDartExecutor() == null || !engine.getDartExecutor().isExecutingDart()) {
+                Log.w("OverlayHealth", "DartExecutor is not executing");
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            Log.e("OverlayHealth", "Error checking health: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Force-cleans the overlay: stops the service, destroys the cached engine,
+     * and recreates a fresh engine ready for the next showOverlay() call.
+     */
+    public void cleanupOverlay(Result result) {
+        try {
+            // Stop the service if running
+            if (OverlayService.isRunning) {
+                final Intent i = new Intent(context, OverlayService.class);
+                context.stopService(i);
+            }
+            // Destroy the cached engine
+            FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
+            if (engine != null) {
+                engine.destroy();
+                FlutterEngineCache.getInstance().remove(OverlayConstants.CACHED_TAG);
+                Log.d("OverlayCleanup", "Old engine destroyed");
+            }
+            // Recreate a fresh engine so showOverlay() works next time
+            FlutterEngineGroup enn = new FlutterEngineGroup(context);
+            DartExecutor.DartEntrypoint dEntry = new DartExecutor.DartEntrypoint(
+                    FlutterInjector.instance().flutterLoader().findAppBundlePath(),
+                    "overlayMain");
+            FlutterEngine newEngine = enn.createAndRunEngine(context, dEntry);
+            FlutterEngineCache.getInstance().put(OverlayConstants.CACHED_TAG, newEngine);
+            Log.d("OverlayCleanup", "Fresh engine created");
+            if (result != null) {
+                result.success(true);
+            }
+        } catch (Exception e) {
+            Log.e("OverlayCleanup", "Error during cleanup: " + e.getMessage());
+            if (result != null) {
+                result.success(false);
+            }
+        }
     }
 
     private boolean checkOverlayPermission() {
