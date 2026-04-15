@@ -58,6 +58,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     public static boolean isRunning = false;
     private WindowManager windowManager = null;
     private FlutterView flutterView;
+    private android.widget.FrameLayout flutterContainer;
     private MethodChannel flutterChannel = null;
     private BasicMessageChannel<Object> overlayMessageChannel = null;
     private int clickableFlag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -83,10 +84,19 @@ public class OverlayService extends Service implements View.OnTouchListener {
     @Override
     public void onDestroy() {
         Log.d("OverLay", "Destroying the overlay window service");
+        // CRITICAL ORDER: detach engine BEFORE removing view from WindowManager.
+        // If we remove the view first, getParent() returns null while the engine
+        // may still fire updateSemantics → AccessibilityBridge NPE → FATAL abort.
+        // Detaching first stops all semantics updates, making removal safe.
+        if (flutterView != null) {
+            flutterView.detachFromFlutterEngine();
+            Log.d("OverLay", "FlutterView detached from engine");
+        }
         if (windowManager != null) {
             try {
-                if (flutterView != null && flutterView.isAttachedToWindow()) {
-                    windowManager.removeView(flutterView);
+                View viewToRemove = flutterContainer != null ? flutterContainer : flutterView;
+                if (viewToRemove != null && viewToRemove.isAttachedToWindow()) {
+                    windowManager.removeView(viewToRemove);
                     Log.d("OverLay", "Overlay view successfully removed from WindowManager");
                 } else {
                     Log.w("OverLay", "Overlay view was not attached to window, skipping removeView");
@@ -95,17 +105,11 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 Log.e("OverLay", "Error removing view from WindowManager: " + e.getMessage());
             } finally {
                 windowManager = null;
-                if (flutterView != null) {
-                    flutterView.detachFromFlutterEngine();
-                    flutterView = null;
-                }
+                flutterView = null;
+                flutterContainer = null;
             }
         }
-        // Destroy the Flutter engine to prevent AccessibilityBridge crash.
-        // After the overlay view is removed, the engine may still attempt to
-        // call updateSemantics → sendAccessibilityEvent → getParent() which
-        // returns null and causes a FATAL abort. Destroying the engine stops
-        // all semantics updates immediately.
+        // Destroy the Flutter engine to fully stop all pending callbacks.
         try {
             FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
             if (engine != null) {
@@ -136,8 +140,11 @@ public class OverlayService extends Service implements View.OnTouchListener {
         Log.d("onStartCommand", "Service started");
         FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
         engine.getLifecycleChannel().appIsResumed();
-        flutterView = new SafeOverlayFlutterView(getApplicationContext(), new FlutterTextureView(getApplicationContext()));
-        flutterView.attachToFlutterEngine(FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG));
+        // Create FlutterView but do NOT attach to engine yet.
+        // Attaching triggers semantics/accessibility updates; if the view
+        // hierarchy isn't in the WindowManager yet, getParent() returns null
+        // and AccessibilityBridge crashes with a FATAL NPE.
+        flutterView = new FlutterView(getApplicationContext(), new FlutterTextureView(getApplicationContext()));
         flutterView.setFitsSystemWindows(true);
         flutterView.setFocusable(true);
         flutterView.setFocusableInTouchMode(true);
@@ -202,21 +209,28 @@ public class OverlayService extends Service implements View.OnTouchListener {
         params.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
 
         flutterView.setFitsSystemWindows(false);
-        flutterView.setOnTouchListener(this);
 
-        // Add SafeOverlayFlutterView directly to WindowManager (no FrameLayout wrapper).
-        // SafeOverlayFlutterView.getParent() returns a safe no-op ViewParent when the real
-        // parent is null, preventing the AccessibilityBridge NPE → FATAL crash.
-        // A FrameLayout wrapper would bypass this protection because FlutterView.getParent()
-        // would return the FrameLayout (not null), but FrameLayout.getParent() would be null
-        // before/after WindowManager attachment, causing the same crash.
+        // Wrap FlutterView in a FrameLayout so FlutterView.getParent() is never null
+        // while attached to the engine (prevents AccessibilityBridge NPE).
+        flutterContainer = new android.widget.FrameLayout(getApplicationContext());
+        flutterContainer.addView(flutterView, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        flutterContainer.setOnTouchListener(this);
 
-        // Post to handler to ensure FlutterView is fully initialized before adding to WindowManager
-        // This prevents "InputChannel is not initialized" crash
+        // CRITICAL ORDER: add to WindowManager FIRST, then attach engine.
+        // This ensures the full view hierarchy (FlutterView → FrameLayout → WindowManager)
+        // has valid parents before the engine starts firing semantics updates.
         new Handler().post(() -> {
             try {
-                if (windowManager != null && flutterView != null) {
-                    windowManager.addView(flutterView, params);
+                if (windowManager != null && flutterContainer != null) {
+                    windowManager.addView(flutterContainer, params);
+                    // Now the hierarchy is fully connected — safe to attach engine.
+                    if (flutterView != null) {
+                        flutterView.attachToFlutterEngine(
+                                FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG));
+                        Log.d("OverlayService", "Engine attached after view added to WindowManager");
+                    }
                 }
             } catch (Exception e) {
                 Log.e("OverlayService", "Error adding view to WindowManager", e);
@@ -263,7 +277,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     }
 
     private View getOverlayView() {
-        return flutterView;
+        return flutterContainer != null ? flutterContainer : flutterView;
     }
 
     private void updateOverlayFlag(MethodChannel.Result result, String flag) {
