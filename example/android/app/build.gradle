@@ -21,13 +21,25 @@ if (flutterVersionName == null) {
     flutterVersionName = '1.0'
 }
 
+def flutterCompileSdkVersion = localProperties.getProperty('flutter.compileSdkVersion')
+if (flutterCompileSdkVersion == null) {
+    flutterCompileSdkVersion = '1.0'
+}
+
+def flutterNdkVersion = localProperties.getProperty('flutter.compileSdkVersion')
+if (flutterNdkVersion == null) {
+    flutterNdkVersion = "26.3.11579264"
+}
+
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 
 android {
-    compileSdkVersion flutter.compileSdkVersion
-    ndkVersion flutter.ndkVersion
+    namespace 'com.example.flutter_overlay_window_example'
+    
+    compileSdkVersion flutterCompileSdkVersion.toInteger()
+    ndkVersion flutterNdkVersion
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8

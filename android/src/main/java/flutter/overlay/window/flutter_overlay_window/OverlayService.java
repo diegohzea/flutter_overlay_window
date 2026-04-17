@@ -10,6 +10,7 @@ import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.PixelFormat;
 import android.app.PendingIntent;
 import android.graphics.Point;
@@ -22,7 +23,9 @@ import android.util.TypedValue;
 import android.view.Display;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.view.WindowMetrics;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
@@ -52,13 +55,14 @@ public class OverlayService extends Service implements View.OnTouchListener {
     private Integer mNavigationBarHeight = -1;
     private Resources mResources;
 
-    public static final String INTENT_EXTRA_IS_CLOSE_WINDOW = "IsCloseWindow";
     public static boolean isRunning = false;
-    public WindowManager windowManager = null;
-    public FlutterView flutterView;
+    private WindowManager windowManager = null;
+    static FlutterView flutterView;
+    private android.widget.FrameLayout flutterContainer;
     private MethodChannel flutterChannel = null;
     private BasicMessageChannel<Object> overlayMessageChannel = null;
-    private int clickableFlag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
+    private int clickableFlag = WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
 
     private Handler mAnimationHandler = new Handler();
@@ -80,15 +84,44 @@ public class OverlayService extends Service implements View.OnTouchListener {
     @Override
     public void onDestroy() {
         Log.d("OverLay", "Destroying the overlay window service");
-        if (windowManager != null) {
-            windowManager.removeView(flutterView);
-            windowManager = null;
-            flutterView.detachFromFlutterEngine();
-            flutterView = null;
+        // CRITICAL ORDER: detach engine BEFORE removing view from WindowManager.
+        // If we remove the view first, getParent() returns null while the engine
+        // may still fire updateSemantics → AccessibilityBridge NPE → FATAL abort.
+        // Detaching first stops all semantics updates, making removal safe.
+        if (flutterView != null) {
+            try {
+                flutterView.detachFromFlutterEngine();
+                Log.d("OverLay", "FlutterView detached from engine");
+            } catch (RuntimeException e) {
+                Log.w("OverLay", "Could not detach FlutterView (engine already destroyed): " + e.getMessage());
+            }
         }
-        isRunning = false;
-        NotificationManager notificationManager = (NotificationManager) getApplicationContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        if (windowManager != null) {
+            try {
+                View viewToRemove = flutterContainer != null ? flutterContainer : flutterView;
+                if (viewToRemove != null && viewToRemove.isAttachedToWindow()) {
+                    windowManager.removeView(viewToRemove);
+                    Log.d("OverLay", "Overlay view successfully removed from WindowManager");
+                } else {
+                    Log.w("OverLay", "Overlay view was not attached to window, skipping removeView");
+                }
+            } catch (IllegalArgumentException e) {
+                Log.e("OverLay", "Error removing view from WindowManager: " + e.getMessage());
+            } finally {
+                windowManager = null;
+                flutterView = null;
+                flutterContainer = null;
+            }
+        }
+        // Do NOT destroy the engine here — it is reused across overlay opens/closes.
+        // The engine runs overlayMain() once and keeps the port registered.
+        // Detaching the FlutterView above is sufficient to stop semantics updates
+        // and prevent the AccessibilityBridge NPE crash.
+        // Engine destruction is only done in cleanupOverlay() when truly corrupted.
+        NotificationManager notificationManager = (NotificationManager) getApplicationContext()
+                .getSystemService(Context.NOTIFICATION_SERVICE);
         notificationManager.cancel(OverlayConstants.NOTIFICATION_ID);
+        isRunning = false;
     }
 
     @RequiresApi(api = Build.VERSION_CODES.JELLY_BEAN_MR1)
@@ -105,12 +138,16 @@ public class OverlayService extends Service implements View.OnTouchListener {
         Log.d("onStartCommand", "Service started");
         FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
         engine.getLifecycleChannel().appIsResumed();
+        // Create FlutterView but do NOT attach to engine yet.
+        // Attaching triggers semantics/accessibility updates; if the view
+        // hierarchy isn't in the WindowManager yet, getParent() returns null
+        // and AccessibilityBridge crashes with a FATAL NPE.
         flutterView = new FlutterView(getApplicationContext(), new FlutterTextureView(getApplicationContext()));
-        flutterView.attachToFlutterEngine(FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG));
         flutterView.setFitsSystemWindows(true);
         flutterView.setFocusable(true);
         flutterView.setFocusableInTouchMode(true);
         flutterView.setBackgroundColor(Color.TRANSPARENT);
+        flutterView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
         flutterChannel.setMethodCallHandler((call, result) -> {
             if (call.method.equals("updateFlag")) {
                 String flag = call.argument("flag").toString();
@@ -126,49 +163,79 @@ public class OverlayService extends Service implements View.OnTouchListener {
         });
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
-            windowManager.getDefaultDisplay().getSize(szWindow);
+        int realWidth;
+        int realHeight;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowMetrics wm = windowManager.getCurrentWindowMetrics();
+            realWidth = wm.getBounds().width();
+            realHeight = wm.getBounds().height();
         } else {
-            DisplayMetrics displaymetrics = new DisplayMetrics();
-            windowManager.getDefaultDisplay().getMetrics(displaymetrics);
-            int w = displaymetrics.widthPixels;
-            int h = displaymetrics.heightPixels;
-            szWindow.set(w, h);
+            DisplayMetrics m = new DisplayMetrics();
+            windowManager.getDefaultDisplay().getRealMetrics(m);
+            realWidth = m.widthPixels;
+            realHeight = m.heightPixels;
         }
         int orientation = this.getResources().getConfiguration().orientation;
+
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                WindowSetup.width == -1999 ? -1 : WindowSetup.width,
-                (orientation == Configuration.ORIENTATION_LANDSCAPE) ? WindowSetup.width
-                        : WindowSetup.height != -1999 ? WindowSetup.height : screenHeight(),
-                0,
-                -(statusBarHeightPx() + navigationBarHeight()),
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE,
-                WindowSetup.flag | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                (WindowSetup.width == -1999 || WindowSetup.width == -1) ? WindowManager.LayoutParams.MATCH_PARENT
+                        : WindowSetup.width,
+                (WindowSetup.height == -1999 || WindowSetup.height == -1) ? WindowManager.LayoutParams.MATCH_PARENT
+                        : WindowSetup.height,
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                        ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                        : WindowManager.LayoutParams.TYPE_PHONE,
+                WindowSetup.flag
+                        | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                         | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-                PixelFormat.TRANSLUCENT
-        );
+                PixelFormat.TRANSLUCENT);
+
+        if (params.width == WindowManager.LayoutParams.MATCH_PARENT)
+            params.width = realWidth;
+        if (params.height == WindowManager.LayoutParams.MATCH_PARENT)
+            params.height = realHeight;
+
+        params.x = 0;
+        params.y = 0;
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && WindowSetup.flag == clickableFlag) {
             params.alpha = MAXIMUM_OPACITY_ALLOWED_FOR_S_AND_HIGHER;
         }
         params.gravity = WindowSetup.gravity;
         params.screenOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
-        flutterView.setOnTouchListener(this);
-        windowManager.addView(flutterView, params);
+
+        flutterView.setFitsSystemWindows(false);
+
+        // Wrap FlutterView in a FrameLayout so FlutterView.getParent() is never null
+        // while attached to the engine (prevents AccessibilityBridge NPE).
+        flutterContainer = new android.widget.FrameLayout(getApplicationContext());
+        flutterContainer.addView(flutterView, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        flutterContainer.setOnTouchListener(this);
+
+        // CRITICAL ORDER: add to WindowManager FIRST, then attach engine.
+        // This ensures the full view hierarchy (FlutterView → FrameLayout → WindowManager)
+        // has valid parents before the engine starts firing semantics updates.
+        new Handler().post(() -> {
+            try {
+                if (windowManager != null && flutterContainer != null) {
+                    windowManager.addView(flutterContainer, params);
+                    // Now the hierarchy is fully connected — safe to attach engine.
+                    if (flutterView != null) {
+                        flutterView.attachToFlutterEngine(
+                                FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG));
+                        Log.d("OverlayService", "Engine attached after view added to WindowManager");
+                    }
+                }
+            } catch (Exception e) {
+                Log.e("OverlayService", "Error adding view to WindowManager", e);
+            }
+        });
+
         return START_STICKY;
-    }
-
-
-    @RequiresApi(api = Build.VERSION_CODES.JELLY_BEAN_MR1)
-    private int screenHeight() {
-        Display display = windowManager.getDefaultDisplay();
-        DisplayMetrics dm = new DisplayMetrics();
-        display.getRealMetrics(dm);
-        return inPortrait() ?
-                dm.heightPixels + statusBarHeightPx() + navigationBarHeightPx() + navigationBarHeight()
-                :
-                dm.heightPixels + statusBarHeightPx();
     }
 
     private int navigationBarHeight() {
@@ -207,20 +274,26 @@ public class OverlayService extends Service implements View.OnTouchListener {
         return mNavigationBarHeight;
     }
 
+    private View getOverlayView() {
+        return flutterContainer != null ? flutterContainer : flutterView;
+    }
 
     private void updateOverlayFlag(MethodChannel.Result result, String flag) {
         if (windowManager != null) {
             WindowSetup.setFlag(flag);
-            WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
-            params.flags = WindowSetup.flag | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS |
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN |
-                    WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
+            WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
+            params.flags = WindowSetup.flag
+                    | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                    | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && WindowSetup.flag == clickableFlag) {
                 params.alpha = MAXIMUM_OPACITY_ALLOWED_FOR_S_AND_HIGHER;
             } else {
-                params.alpha = 1;
+                params.alpha = 1f;
             }
-            windowManager.updateViewLayout(flutterView, params);
+            windowManager.updateViewLayout(getOverlayView(), params);
             result.success(true);
         } else {
             result.success(false);
@@ -229,16 +302,34 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
     private void resizeOverlay(int width, int height, MethodChannel.Result result) {
         if (windowManager != null) {
-            WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
-            params.width = (width == -1999 || width == -1) ? -1 : dpToPx(width);
-            params.height = (height != 1999 || height != -1) ? dpToPx(height) : height;
-            windowManager.updateViewLayout(flutterView, params);
+            WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
+
+            params.width = (width == -1999 || width == -1) ? WindowManager.LayoutParams.MATCH_PARENT : dpToPx(width);
+            params.height = (height == -1999 || height == -1) ? WindowManager.LayoutParams.MATCH_PARENT
+                    : dpToPx(height);
+
+            int realW, realH;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowMetrics wm = windowManager.getCurrentWindowMetrics();
+                realW = wm.getBounds().width();
+                realH = wm.getBounds().height();
+            } else {
+                DisplayMetrics m = new DisplayMetrics();
+                windowManager.getDefaultDisplay().getRealMetrics(m);
+                realW = m.widthPixels;
+                realH = m.heightPixels;
+            }
+            if (params.width == WindowManager.LayoutParams.MATCH_PARENT)
+                params.width = realW;
+            if (params.height == WindowManager.LayoutParams.MATCH_PARENT)
+                params.height = realH;
+
+            windowManager.updateViewLayout(getOverlayView(), params);
             result.success(true);
         } else {
             result.success(false);
         }
     }
-
 
     @Override
     public void onCreate() {
@@ -273,8 +364,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
             NotificationChannel serviceChannel = new NotificationChannel(
                     OverlayConstants.CHANNEL_ID,
                     "Foreground Service Channel",
-                    NotificationManager.IMPORTANCE_DEFAULT
-            );
+                    NotificationManager.IMPORTANCE_DEFAULT);
             NotificationManager manager = getSystemService(NotificationManager.class);
             assert manager != null;
             manager.createNotificationChannel(serviceChannel);
@@ -282,12 +372,12 @@ public class OverlayService extends Service implements View.OnTouchListener {
     }
 
     private int getDrawableResourceId(String resType, String name) {
-        return getApplicationContext().getResources().getIdentifier(String.format("ic_%s", name), resType, getApplicationContext().getPackageName());
+        return getApplicationContext().getResources().getIdentifier(String.format("ic_%s", name), resType,
+                getApplicationContext().getPackageName());
     }
 
     private int dpToPx(int dp) {
-        return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
-                Float.parseFloat(dp + ""), mResources.getDisplayMetrics());
+        return Math.round(dp * mResources.getDisplayMetrics().density);
     }
 
     private boolean inPortrait() {
@@ -297,7 +387,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
     @Override
     public boolean onTouch(View view, MotionEvent event) {
         if (windowManager != null && WindowSetup.enableDrag) {
-            WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
+            WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
             switch (event.getAction()) {
                 case MotionEvent.ACTION_DOWN:
                     dragging = false;
@@ -317,7 +407,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     params.x = xx;
                     params.y = yy;
                     if (windowManager != null) {
-                        windowManager.updateViewLayout(flutterView, params);
+                        windowManager.updateViewLayout(getOverlayView(), params);
                     }
                     dragging = true;
                     break;
@@ -325,8 +415,9 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 case MotionEvent.ACTION_CANCEL:
                     lastYPosition = params.y;
                     if (WindowSetup.positionGravity != "none") {
-                        if (windowManager == null) return false;
-                        windowManager.updateViewLayout(flutterView, params);
+                        if (windowManager == null)
+                            return false;
+                        windowManager.updateViewLayout(getOverlayView(), params);
                         mTrayTimerTask = new TrayAnimationTimerTask();
                         mTrayAnimationTimer = new Timer();
                         mTrayAnimationTimer.schedule(mTrayTimerTask, 0, 25);
@@ -343,14 +434,15 @@ public class OverlayService extends Service implements View.OnTouchListener {
     private class TrayAnimationTimerTask extends TimerTask {
         int mDestX;
         int mDestY;
-        WindowManager.LayoutParams params = (WindowManager.LayoutParams) flutterView.getLayoutParams();
+        WindowManager.LayoutParams params = (WindowManager.LayoutParams) getOverlayView().getLayoutParams();
 
         public TrayAnimationTimerTask() {
             super();
             mDestY = lastYPosition;
             switch (WindowSetup.positionGravity) {
                 case "auto":
-                    mDestX = (params.x + (flutterView.getWidth() / 2)) <= szWindow.x / 2 ? 0 : szWindow.x - flutterView.getWidth();
+                    mDestX = (params.x + (flutterView.getWidth() / 2)) <= szWindow.x / 2 ? 0
+                            : szWindow.x - flutterView.getWidth();
                     return;
                 case "left":
                     mDestX = 0;
@@ -371,7 +463,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 params.x = (2 * (params.x - mDestX)) / 3 + mDestX;
                 params.y = (2 * (params.y - mDestY)) / 3 + mDestY;
                 if (windowManager != null) {
-                    windowManager.updateViewLayout(flutterView, params);
+                    windowManager.updateViewLayout(getOverlayView(), params);
                 }
                 if (Math.abs(params.x - mDestX) < 2 && Math.abs(params.y - mDestY) < 2) {
                     TrayAnimationTimerTask.this.cancel();
@@ -381,11 +473,14 @@ public class OverlayService extends Service implements View.OnTouchListener {
         }
     }
 
-
     public void validateDartExecutor() {
         try {
-            flutterChannel = new MethodChannel(FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(), OverlayConstants.OVERLAY_TAG);
-            overlayMessageChannel = new BasicMessageChannel(FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(), OverlayConstants.MESSENGER_TAG, JSONMessageCodec.INSTANCE);
+            flutterChannel = new MethodChannel(
+                    FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(),
+                    OverlayConstants.OVERLAY_TAG);
+            overlayMessageChannel = new BasicMessageChannel(
+                    FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(),
+                    OverlayConstants.MESSENGER_TAG, JSONMessageCodec.INSTANCE);
         } catch (Exception e) {
             FlutterEngineGroup enn = new FlutterEngineGroup(getApplicationContext());
             DartExecutor.DartEntrypoint dEntry = new DartExecutor.DartEntrypoint(
@@ -393,8 +488,12 @@ public class OverlayService extends Service implements View.OnTouchListener {
                     "overlayMain");
             FlutterEngine engine = enn.createAndRunEngine(getApplicationContext(), dEntry);
             FlutterEngineCache.getInstance().put(OverlayConstants.CACHED_TAG, engine);
-            flutterChannel = new MethodChannel(FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(), OverlayConstants.OVERLAY_TAG);
-            overlayMessageChannel = new BasicMessageChannel(FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(), OverlayConstants.MESSENGER_TAG, JSONMessageCodec.INSTANCE);
+            flutterChannel = new MethodChannel(
+                    FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(),
+                    OverlayConstants.OVERLAY_TAG);
+            overlayMessageChannel = new BasicMessageChannel(
+                    FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG).getDartExecutor(),
+                    OverlayConstants.MESSENGER_TAG, JSONMessageCodec.INSTANCE);
         }
     }
 }
