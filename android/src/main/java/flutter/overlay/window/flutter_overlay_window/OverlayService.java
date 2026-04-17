@@ -57,7 +57,7 @@ public class OverlayService extends Service implements View.OnTouchListener {
 
     public static boolean isRunning = false;
     private WindowManager windowManager = null;
-    private FlutterView flutterView;
+    static FlutterView flutterView;
     private android.widget.FrameLayout flutterContainer;
     private MethodChannel flutterChannel = null;
     private BasicMessageChannel<Object> overlayMessageChannel = null;
@@ -89,8 +89,12 @@ public class OverlayService extends Service implements View.OnTouchListener {
         // may still fire updateSemantics → AccessibilityBridge NPE → FATAL abort.
         // Detaching first stops all semantics updates, making removal safe.
         if (flutterView != null) {
-            flutterView.detachFromFlutterEngine();
-            Log.d("OverLay", "FlutterView detached from engine");
+            try {
+                flutterView.detachFromFlutterEngine();
+                Log.d("OverLay", "FlutterView detached from engine");
+            } catch (RuntimeException e) {
+                Log.w("OverLay", "Could not detach FlutterView (engine already destroyed): " + e.getMessage());
+            }
         }
         if (windowManager != null) {
             try {
@@ -109,17 +113,11 @@ public class OverlayService extends Service implements View.OnTouchListener {
                 flutterContainer = null;
             }
         }
-        // Destroy the Flutter engine to fully stop all pending callbacks.
-        try {
-            FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
-            if (engine != null) {
-                engine.destroy();
-                FlutterEngineCache.getInstance().remove(OverlayConstants.CACHED_TAG);
-                Log.d("OverLay", "Flutter engine destroyed successfully");
-            }
-        } catch (Exception e) {
-            Log.e("OverLay", "Error destroying Flutter engine: " + e.getMessage());
-        }
+        // Do NOT destroy the engine here — it is reused across overlay opens/closes.
+        // The engine runs overlayMain() once and keeps the port registered.
+        // Detaching the FlutterView above is sufficient to stop semantics updates
+        // and prevent the AccessibilityBridge NPE crash.
+        // Engine destruction is only done in cleanupOverlay() when truly corrupted.
         NotificationManager notificationManager = (NotificationManager) getApplicationContext()
                 .getSystemService(Context.NOTIFICATION_SERVICE);
         notificationManager.cancel(OverlayConstants.NOTIFICATION_ID);

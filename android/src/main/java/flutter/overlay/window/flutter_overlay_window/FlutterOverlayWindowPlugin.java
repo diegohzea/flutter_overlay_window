@@ -206,13 +206,24 @@ public class FlutterOverlayWindowPlugin implements
      */
     public void cleanupOverlay(Result result) {
         try {
+            // Detach FlutterView from engine BEFORE destroying anything.
+            // onDestroy runs asynchronously after stopService, so if we destroy
+            // the engine first, onDestroy's detach call hits a dead JNI → FATAL crash.
+            FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
+            if (OverlayService.flutterView != null && engine != null) {
+                try {
+                    OverlayService.flutterView.detachFromFlutterEngine();
+                    Log.d("OverlayCleanup", "FlutterView detached from engine before cleanup");
+                } catch (RuntimeException e) {
+                    Log.w("OverlayCleanup", "Could not detach view: " + e.getMessage());
+                }
+            }
             // Stop the service if running
             if (OverlayService.isRunning) {
                 final Intent i = new Intent(context, OverlayService.class);
                 context.stopService(i);
             }
             // Destroy the cached engine
-            FlutterEngine engine = FlutterEngineCache.getInstance().get(OverlayConstants.CACHED_TAG);
             if (engine != null) {
                 engine.destroy();
                 FlutterEngineCache.getInstance().remove(OverlayConstants.CACHED_TAG);
